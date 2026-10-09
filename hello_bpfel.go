@@ -8,15 +8,23 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
+
+type helloStats struct {
+	_       structs.HostLayout
+	Packets uint64
+	Bytes   uint64
+}
 
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	helloProgHello = "hello"
+	helloMapPktStates = "pkt_states"
+	helloProgHello    = "hello"
 )
 
 // loadHello returns the embedded CollectionSpec for hello.
@@ -68,6 +76,7 @@ type helloProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type helloMapSpecs struct {
+	PktStates *ebpf.MapSpec `ebpf:"pkt_states"`
 }
 
 // helloVariableSpecs contains global variables before they are loaded into the kernel.
@@ -96,10 +105,13 @@ func (o *helloObjects) Close() error {
 //
 // It can be passed to loadHelloObjects or ebpf.CollectionSpec.LoadAndAssign.
 type helloMaps struct {
+	PktStates *ebpf.Map `ebpf:"pkt_states"`
 }
 
 func (m *helloMaps) Close() error {
-	return _HelloClose()
+	return _HelloClose(
+		m.PktStates,
+	)
 }
 
 // helloVariables contains all global variables after they have been loaded into the kernel.

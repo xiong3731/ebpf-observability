@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -42,9 +43,30 @@ func main() {
 	fmt.Println("已挂载到", index.Name, "ingress")
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt) // 收到 Ctrl+C 时，往 sig 里发一个值
-	<-sig                            // 阻塞在这里，直到收到值
+	signal.Notify(sig, os.Interrupt)
 
-	fmt.Println("\n退出，自动卸载")
+	ticker := time.NewTicker(time.Second) // 每秒往 ticker.C 里发一个值
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			var perCPUStats []helloStats
+			if err := objs.PktStates.Lookup(uint32(0), &perCPUStats); err != nil {
+				fmt.Println("读取 map 失败:", err)
+				continue
+			}
+			var total helloStats
+			for _, s := range perCPUStats {
+				total.Packets += s.Packets
+				total.Bytes += s.Bytes
+			}
+
+			fmt.Printf("累计包数: %d, 累计字节数: %d\n", total.Packets, total.Bytes)
+		case <-sig:
+			fmt.Println("\n退出，自动卸载")
+			return
+		}
+	}
 
 }
