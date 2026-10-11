@@ -18,6 +18,19 @@ struct {
 } pkt_states SEC(".maps");
 
 
+struct flow_key{
+    __be32 saddr;
+    __be32 daddr;
+    __u16 source;
+    __u16 dest;
+};
+
+struct {
+    __uint(type,BPF_MAP_TYPE_LRU_HASH );
+    __uint(max_entries, 10240);
+    __type(key, struct flow_key);
+    __type(value, struct stats);
+}flows SEC(".maps");
 
 static __always_inline int handle(struct __sk_buff *skb, int egress){
     void *data = (void *)(long)skb->data;
@@ -56,6 +69,26 @@ static __always_inline int handle(struct __sk_buff *skb, int egress){
         return TC_ACT_OK;
     s->packets++;
     s->bytes += skb->len;
+
+
+    struct flow_key fkey = {};
+    fkey.saddr= ip->addrs.saddr;
+    fkey.daddr= ip->addrs.daddr;
+    fkey.source=bpf_ntohs(tcp->source);
+    fkey.dest=bpf_ntohs(tcp->dest);
+
+    struct stats *fs=bpf_map_lookup_elem(&flows, &fkey);
+    if (!fs){
+        struct stats init={};
+        init.packets=1;
+        init.bytes = skb->len;
+        bpf_map_update_elem(&flows,&fkey,&init,BPF_NOEXIST);
+    }else{
+        __sync_fetch_and_add(&fs->packets,1);
+        __sync_fetch_and_add(&fs->bytes,skb->len);
+    }
+
+
     return TC_ACT_OK;
 }
 

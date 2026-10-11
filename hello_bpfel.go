@@ -13,6 +13,14 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type helloFlowKey struct {
+	_      structs.HostLayout
+	Saddr  uint32
+	Daddr  uint32
+	Source uint16
+	Dest   uint16
+}
+
 type helloStats struct {
 	_       structs.HostLayout
 	Packets uint64
@@ -23,6 +31,7 @@ type helloStats struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	helloMapFlows      = "flows"
 	helloMapPktStates  = "pkt_states"
 	helloProgTcEgress  = "tc_egress"
 	helloProgTcIngress = "tc_ingress"
@@ -78,6 +87,7 @@ type helloProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type helloMapSpecs struct {
+	Flows     *ebpf.MapSpec `ebpf:"flows"`
 	PktStates *ebpf.MapSpec `ebpf:"pkt_states"`
 }
 
@@ -107,11 +117,13 @@ func (o *helloObjects) Close() error {
 //
 // It can be passed to loadHelloObjects or ebpf.CollectionSpec.LoadAndAssign.
 type helloMaps struct {
+	Flows     *ebpf.Map `ebpf:"flows"`
 	PktStates *ebpf.Map `ebpf:"pkt_states"`
 }
 
 func (m *helloMaps) Close() error {
 	return _HelloClose(
+		m.Flows,
 		m.PktStates,
 	)
 }
