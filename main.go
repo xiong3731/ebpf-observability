@@ -31,7 +31,7 @@ func main() {
 
 	l, err := link.AttachTCX(link.TCXOptions{
 		Interface: index.Index,
-		Program:   objs.Hello,
+		Program:   objs.TcIngress,
 		Attach:    ebpf.AttachTCXIngress,
 	})
 	if err != nil {
@@ -41,6 +41,18 @@ func main() {
 	defer l.Close()
 
 	fmt.Println("已挂载到", index.Name, "ingress")
+
+	le, err := link.AttachTCX(link.TCXOptions{
+		Interface: index.Index,
+		Program:   objs.TcEgress,
+		Attach:    ebpf.AttachTCXEgress,
+	})
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+	defer le.Close()
+	fmt.Println("已挂载到", index.Name, "egress")
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)

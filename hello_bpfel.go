@@ -23,8 +23,9 @@ type helloStats struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	helloMapPktStates = "pkt_states"
-	helloProgHello    = "hello"
+	helloMapPktStates  = "pkt_states"
+	helloProgTcEgress  = "tc_egress"
+	helloProgTcIngress = "tc_ingress"
 )
 
 // loadHello returns the embedded CollectionSpec for hello.
@@ -69,7 +70,8 @@ type helloSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type helloProgramSpecs struct {
-	Hello *ebpf.ProgramSpec `ebpf:"hello"`
+	TcEgress  *ebpf.ProgramSpec `ebpf:"tc_egress"`
+	TcIngress *ebpf.ProgramSpec `ebpf:"tc_ingress"`
 }
 
 // helloMapSpecs contains maps before they are loaded into the kernel.
@@ -124,12 +126,14 @@ type helloVariables struct {
 //
 // It can be passed to loadHelloObjects or ebpf.CollectionSpec.LoadAndAssign.
 type helloPrograms struct {
-	Hello *ebpf.Program `ebpf:"hello"`
+	TcEgress  *ebpf.Program `ebpf:"tc_egress"`
+	TcIngress *ebpf.Program `ebpf:"tc_ingress"`
 }
 
 func (p *helloPrograms) Close() error {
 	return _HelloClose(
-		p.Hello,
+		p.TcEgress,
+		p.TcIngress,
 	)
 }
 

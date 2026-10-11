@@ -275,7 +275,7 @@ NLB 做 FullNAT 时，后端看到的源 IP 是 NLB 的 IP，真实客户端 IP 
 ## 学习路线
 
 - [x] 最小 TC 程序：`bpf_printk` + 加载 + TCX 挂载
-- [ ] 用 map 计数（包数 / 字节数），Go 每秒读一次
+- [x] 用 map 计数（包数 / 字节数），Go 每秒读一次
 - [ ] 解析 Ethernet → IPv4 → TCP 头，按五元组统计
 - [ ] 解析 TCP Option 中的 TOA，写入 LRU_HASH
 - [ ] FIN/RST 清理、NLB 网段校验、ringbuf 上报事件
