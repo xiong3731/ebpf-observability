@@ -23,16 +23,16 @@ cat /sys/kernel/debug/tracing/trace_pipe
 ## 1. 整体流程
 
 ```text
-bpf/hello.bpf.c
+bpf/flow.bpf.c
      │  go generate → bpf2go → clang
      ▼
-hello_bpfel.o ──(go:embed)──> _HelloBytes
-                                   │ loadHelloObjects(&objs)
+bpf_bpfel.o ──(go:embed)──> _BpfBytes
+                                   │ loadBpfObjects(&objs)
                                    ▼
                           内核（verifier 检查通过后加载）
                                    │ link.AttachTCX(...)
                                    ▼
-                     挂到网卡 tc ingress，每个包触发一次
+                     挂到网卡 tc ingress / egress，每个包触发一次
 ```
 
 内核不认识 C 源码，只认 **BPF 字节码**，所以需要两步：
@@ -45,7 +45,7 @@ hello_bpfel.o ──(go:embed)──> _HelloBytes
 ## 2. go:generate 与 bpf2go
 
 ```go
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel hello bpf/hello.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel bpf bpf/flow.bpf.c
 ```
 
 - `//go:generate` **只是一条记在代码里的命令**。执行 `go generate` 时，Go 会把它当成 shell 命令执行。
@@ -57,13 +57,13 @@ hello_bpfel.o ──(go:embed)──> _HelloBytes
 | 参数 | 含义 |
 |---|---|
 | `-target bpfel` | 小端字节码（x86、ARM64 都是小端）。也决定了文件名后缀 `_bpfel`。可选 `bpfeb`（大端）、`bpf`（两种都生成） |
-| `hello` | 生成代码的**名字前缀**：`helloObjects`、`loadHelloObjects()`、`hello_bpfel.go`。与 C 函数名无关 |
-| `bpf/hello.bpf.c` | C 源文件，路径相对于 `//go:generate` 所在文件的目录 |
+| `bpf` | 生成代码的**名字前缀**：`bpfObjects`、`loadBpfObjects()`、`bpf_bpfel.go`。与 C 函数名无关 |
+| `bpf/flow.bpf.c` | C 源文件，路径相对于 `//go:generate` 所在文件的目录 |
 | `-- -O2 -g -Wall` | `--` 之后的参数原样传给 clang（bpf2go 默认已带 `-O2 -g`） |
 
 ### 生成的文件（不要手改）
 
-**`hello_bpfel.o`**：BPF 字节码，ELF 格式。
+**`bpf_bpfel.o`**：BPF 字节码，ELF 格式。
 
 | section | 来自 |
 |---|---|
@@ -72,7 +72,7 @@ hello_bpfel.o ──(go:embed)──> _HelloBytes
 | `.rodata` | 只读数据，比如 `bpf_printk` 的字符串 |
 | `.BTF` / `.BTF.ext` | 类型信息和行号（`-g` 生成），verifier 报错时显示 C 源码行 |
 
-查看反汇编：`llvm-objdump-18 -d -S hello_bpfel.o`
+查看反汇编：`llvm-objdump-18 -d -S bpf_bpfel.o`
 
 ```text
 r1 = 0x0 ll   ← 参数1：字符串地址（加载时重定位）
@@ -84,15 +84,15 @@ exit
 
 BPF 虚拟机有 r0 到 r10 共 11 个寄存器：r1 到 r5 传参，r0 放返回值。
 
-**`hello_bpfel.go`**：Go 绑定。
+**`bpf_bpfel.go`**：Go 绑定。
 
 | 内容 | 作用 |
 |---|---|
-| `//go:embed hello_bpfel.o` | 编译时把 `.o` 嵌入二进制，部署时不需要带 `.o` 文件 |
-| `loadHelloObjects(obj, opts)` | 解析 ELF → 加载进内核 → 把结果填进结构体 |
-| `helloObjects` | 嵌入了 `helloPrograms` / `helloMaps` / `helloVariables`，所以可以直接写 `objs.Hello` |
-| `Hello *ebpf.Program \`ebpf:"hello"\`` | 结构体标签告诉库：这个字段对应 ELF 里名为 `hello` 的程序 |
-| `helloSpecs` vs `helloObjects` | Specs 是**加载前**的描述；Objects 是**已加载**的内核对象（持有 fd） |
+| `//go:embed bpf_bpfel.o` | 编译时把 `.o` 嵌入二进制，部署时不需要带 `.o` 文件 |
+| `loadBpfObjects(obj, opts)` | 解析 ELF → 加载进内核 → 把结果填进结构体 |
+| `bpfObjects` | 嵌入了 `bpfPrograms` / `bpfMaps` / `bpfVariables`，所以可以直接写 `objs.TcIngress` |
+| `TcIngress *ebpf.Program \`ebpf:"tc_ingress"\`` | 结构体标签告诉库：这个字段对应 ELF 里名为 `tc_ingress` 的程序 |
+| `bpfSpecs` vs `bpfObjects` | Specs 是**加载前**的描述；Objects 是**已加载**的内核对象（持有 fd） |
 | `Close()` | 关闭 fd，释放内核对象 |
 | `//go:build amd64 \|\| arm64 ...` | 只在小端架构上编译，和 `-target bpfel` 对应 |
 
@@ -141,14 +141,14 @@ char _license[] SEC("license") = "GPL";
 ## 4. 加载 vs 挂载，以及生命周期
 
 ```text
-加载 (load)    loadHelloObjects()  程序进入内核，但没接到任何挂载点 → 不会被触发
+加载 (load)    loadBpfObjects()  程序进入内核，但没接到任何挂载点 → 不会被触发
 挂载 (attach)  link.AttachTCX()    接到网卡 tc ingress 上 → 每来一个包执行一次
 ```
 
 ```go
 l, err := link.AttachTCX(link.TCXOptions{
     Interface: iface.Index,          // 网卡 index，不是名字
-    Program:   objs.Hello,
+    Program:   objs.TcIngress,
     Attach:    ebpf.AttachTCXIngress, // 或 AttachTCXEgress
 })
 defer l.Close()
@@ -164,7 +164,7 @@ defer l.Close()
 验证命令：
 
 ```bash
-bpftool prog list | grep -A2 hello    # 内核里有没有这个程序
+bpftool prog list | grep -A2 tc_      # 内核里有没有这个程序
 bpftool net show dev eth0             # 网卡上挂了什么
 ```
 
@@ -186,16 +186,16 @@ bpftool net show dev eth0             # 网卡上挂了什么
 |---|---|
 | 错误处理 | `if err := f(); err != nil { ... }`，`err` 的作用域只在 if 内 |
 | 错误包装 | `fmt.Errorf("加载: %w", err)`；用 `errors.As` 判断具体类型 |
-| 传指针 | `loadHelloObjects(&objs, nil)`：函数要往结构体里填数据，传值只会填到拷贝上 |
-| 零值 | `var objs helloObjects` 声明后字段都是零值（指针为 nil） |
+| 传指针 | `loadBpfObjects(&objs, nil)`：函数要往结构体里填数据，传值只会填到拷贝上 |
+| 零值 | `var objs bpfObjects` 声明后字段都是零值（指针为 nil） |
 | defer | 函数返回时执行，**后进先出**。先注册的 `objs.Close()` 最后执行 |
 | `log.Fatal` 陷阱 | 会直接 `os.Exit`，**跳过 defer**。惯用法是逻辑放进 `run() error`，main 只负责退出 |
 | 结构体字面量 | `link.TCXOptions{Interface: ..., Program: ...}`，未写的字段取零值 |
-| 结构体嵌入 | 字段提升，`objs.helloPrograms.Hello` 可以简写成 `objs.Hello` |
-| 结构体标签 | `` `ebpf:"hello"` ``，库通过反射读取 |
+| 结构体嵌入 | 字段提升，`objs.bpfPrograms.TcIngress` 可以简写成 `objs.TcIngress` |
+| 结构体标签 | `` `ebpf:"tc_ingress"` ``，库通过反射读取 |
 | channel + 信号 | `sig := make(chan os.Signal, 1)`；`signal.Notify(sig, os.Interrupt)`；`<-sig` 阻塞到按下 Ctrl+C |
 | `go:embed` | 编译时把文件内容嵌入成 `[]byte` |
-| 小写开头 | 包内私有（bpf2go 生成的 `helloObjects` 只给 main 包用） |
+| 小写开头 | 包内私有（bpf2go 生成的 `bpfObjects` 只给 main 包用） |
 
 ## 7. 程序类型怎么选
 

@@ -1,6 +1,6 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel hello bpf/hello.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel bpf bpf/flow.bpf.c
 
 import (
 	"encoding/binary"
@@ -15,23 +15,23 @@ import (
 )
 
 func main() {
-	index, err := net.InterfaceByName("eth0")
+	iface, err := net.InterfaceByName("eth0")
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
-	fmt.Println("网卡:", index.Name, "索引:", index.Index)
+	fmt.Println("网卡:", iface.Name, "索引:", iface.Index)
 
-	var objs helloObjects
-	if err := loadHelloObjects(&objs, nil); err != nil {
+	var objs bpfObjects
+	if err := loadBpfObjects(&objs, nil); err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
 	defer objs.Close()
 	fmt.Println("BPF程序加载成功")
 
-	l, err := link.AttachTCX(link.TCXOptions{
-		Interface: index.Index,
+	ingress, err := link.AttachTCX(link.TCXOptions{
+		Interface: iface.Index,
 		Program:   objs.TcIngress,
 		Attach:    ebpf.AttachTCXIngress,
 	})
@@ -39,12 +39,11 @@ func main() {
 		fmt.Println("Error:", err)
 		return
 	}
-	defer l.Close()
+	defer ingress.Close()
+	fmt.Println("已挂载到", iface.Name, "ingress")
 
-	fmt.Println("已挂载到", index.Name, "ingress")
-
-	le, err := link.AttachTCX(link.TCXOptions{
-		Interface: index.Index,
+	egress, err := link.AttachTCX(link.TCXOptions{
+		Interface: iface.Index,
 		Program:   objs.TcEgress,
 		Attach:    ebpf.AttachTCXEgress,
 	})
@@ -52,8 +51,8 @@ func main() {
 		fmt.Println("Error:", err)
 		return
 	}
-	defer le.Close()
-	fmt.Println("已挂载到", index.Name, "egress")
+	defer egress.Close()
+	fmt.Println("已挂载到", iface.Name, "egress")
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
@@ -64,26 +63,28 @@ func main() {
 	for {
 		select {
 		case <-ticker.C:
-			var perCPUStats []helloStats
-			if err := objs.PktStates.Lookup(uint32(0), &perCPUStats); err != nil {
-				fmt.Println("读取 map 失败:", err)
+			// 总计数：PERCPU map 读出来是每个 CPU 一份，要自己加起来
+			var perCPU []bpfStats
+			if err := objs.TotalStats.Lookup(uint32(0), &perCPU); err != nil {
+				fmt.Println("读取 total_stats 失败:", err)
 				continue
 			}
-			var total helloStats
-			for _, s := range perCPUStats {
+			var total bpfStats
+			for _, s := range perCPU {
 				total.Packets += s.Packets
 				total.Bytes += s.Bytes
 			}
-
 			fmt.Printf("累计包数: %d, 累计字节数: %d\n", total.Packets, total.Bytes)
-			var fk helloFlowKey // 用来接收每一行的 key
-			var fv helloStats   // 用来接收每一行的 value
+
+			// 按连接计数：逐行遍历 flows
+			var key bpfFlowKey      // 用来接收每一行的 key
+			var val bpfFlowCounters // 用来接收每一行的 value
 			iter := objs.Flows.Iterate()
-			for iter.Next(&fk, &fv) {
-				fmt.Printf("  %s:%d -> %s:%d  包数=%d 字节=%d\n",
-					ipStr(fk.Saddr), fk.Source,
-					ipStr(fk.Daddr), fk.Dest,
-					fv.Packets, fv.Bytes)
+			for iter.Next(&key, &val) {
+				fmt.Printf("Local: %s:%d <-> Remote: %s:%d  receive 包数=%d 字节=%d ; send 包数=%d 字节=%d\n",
+					ipStr(key.LocalIp), key.LocalPort,
+					ipStr(key.RemoteIp), key.RemotePort,
+					val.RxPackets, val.RxBytes, val.TxPackets, val.TxBytes)
 			}
 			if err := iter.Err(); err != nil {
 				fmt.Println("遍历 flows 失败:", err)
@@ -93,9 +94,9 @@ func main() {
 			return
 		}
 	}
-
 }
 
+// 把 BPF 里存的 IPv4 地址（网络字节序）转换成 "10.34.152.32" 这样的字符串
 func ipStr(addr uint32) string {
 	b := make([]byte, 4)
 	binary.LittleEndian.PutUint32(b, addr)
