@@ -35,11 +35,19 @@ type bpfStats struct {
 	Bytes   uint64
 }
 
+type bpfToaClient struct {
+	_    structs.HostLayout
+	Ip   uint32
+	Port uint16
+	Pad  uint16
+}
+
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
 	bpfMapFlows      = "flows"
+	bpfMapToaMap     = "toa_map"
 	bpfMapTotalStats = "total_stats"
 	bpfProgTcEgress  = "tc_egress"
 	bpfProgTcIngress = "tc_ingress"
@@ -96,6 +104,7 @@ type bpfProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
 	Flows      *ebpf.MapSpec `ebpf:"flows"`
+	ToaMap     *ebpf.MapSpec `ebpf:"toa_map"`
 	TotalStats *ebpf.MapSpec `ebpf:"total_stats"`
 }
 
@@ -126,12 +135,14 @@ func (o *bpfObjects) Close() error {
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
 	Flows      *ebpf.Map `ebpf:"flows"`
+	ToaMap     *ebpf.Map `ebpf:"toa_map"`
 	TotalStats *ebpf.Map `ebpf:"total_stats"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.Flows,
+		m.ToaMap,
 		m.TotalStats,
 	)
 }

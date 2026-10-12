@@ -79,12 +79,18 @@ func main() {
 			// 按连接计数：逐行遍历 flows
 			var key bpfFlowKey      // 用来接收每一行的 key
 			var val bpfFlowCounters // 用来接收每一行的 value
+			var toa bpfToaClient
 			iter := objs.Flows.Iterate()
 			for iter.Next(&key, &val) {
-				fmt.Printf("Local: %s:%d <-> Remote: %s:%d  receive 包数=%d 字节=%d ; send 包数=%d 字节=%d\n",
+				if err := objs.ToaMap.Lookup(key, &toa); err != nil {
+					toa.Ip = 0
+					toa.Port = 0
+				}
+
+				fmt.Printf("Local: %s:%d <-> Remote: %s:%d  receive 包数=%d 字节=%d ; send 包数=%d 字节=%d real client=%s:%d\n",
 					ipStr(key.LocalIp), key.LocalPort,
 					ipStr(key.RemoteIp), key.RemotePort,
-					val.RxPackets, val.RxBytes, val.TxPackets, val.TxBytes)
+					val.RxPackets, val.RxBytes, val.TxPackets, val.TxBytes, ipStr(toa.Ip), toa.Port)
 			}
 			if err := iter.Err(); err != nil {
 				fmt.Println("遍历 flows 失败:", err)
