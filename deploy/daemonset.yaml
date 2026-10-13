@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ebpf-obs
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ebpf-obs-agent
+  namespace: ebpf-obs
+  labels:
+    app: ebpf-obs-agent
+spec:
+  selector:
+    matchLabels:
+      app: ebpf-obs-agent
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: ebpf-obs-agent
+    spec:
+      hostNetwork: true      # 要挂到节点自己的网卡上
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: legacy-kernel     # TCX 需要内核 6.6+，4.19 / 5.4 的节点加载不了
+                    operator: NotIn
+                    values: ["true"]
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: exporter
+          image: uhub.service.ucloud.cn/aigc-serving-public/ebpf-obs-agent:v0.1.0
+          args:
+            # ingress-nginx-controller 的 NodePort（80→31771, 443→30025）
+            - -ports=31771,30025
+            # 每个 (src_ip, dst_ip, toa_ip) 产生 5 条时间序列，这个值直接决定 Prometheus 压力
+            - -max-pairs=10000
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          ports:
+            - name: metrics
+              containerPort: 9435
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          securityContext:
+            capabilities:
+              drop: [ALL]
+              add: [BPF, NET_ADMIN, PERFMON]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: ebpf-obs-agent
+  namespace: ebpf-obs
+spec:
+  selector:
+    matchLabels:
+      app: ebpf-obs-agent
+  podMetricsEndpoints:
+    - port: metrics
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

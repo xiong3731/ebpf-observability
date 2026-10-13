@@ -2,21 +2,49 @@
 
 Go + eBPF 学习笔记与练习项目。用户态使用 [cilium/ebpf](https://github.com/cilium/ebpf)，内核态用 C 编写。
 
+## 这是什么
+
+挂在节点网卡 tc ingress/egress 上的 Prometheus exporter：统计入站 TCP 连接的流量，
+并从 TCP Option 里解析 TOA，把流量记到 NLB 后面的**真实客户端 IP** 上。
+
+| 指标 | 含义 |
+|---|---|
+| `ebpf_tcp_rx_bytes_total{src_ip,dst_ip,toa_ip}` / `..._rx_packets_total` | dst 从 src 收到的字节 / 包 |
+| `ebpf_tcp_tx_bytes_total{src_ip,dst_ip,toa_ip}` / `..._tx_packets_total` | dst 发给 src 的字节 / 包 |
+| `ebpf_tcp_connections_total{src_ip,dst_ip,toa_ip}` | src 向 dst 新建的连接数 |
+| `ebpf_tcp_pairs` | 当前跟踪的 (src, dst, toa) 组合数，接近 `-max-pairs` 说明在淘汰 |
+| `ebpf_tcp_scrape_success` | 本次读内核 map 是否完整 |
+
+`src_ip` 是发起连接（发 SYN）的一方，`dst_ip` 是接受连接的一方；一期只跟踪入站连接，`dst_ip` 就是本节点。
+`toa_ip` 是 TOA 里的真实客户端 IP，连接没带 TOA（NLB 健康检查、直连 NodePort 等）时为空。不记端口。
+只统计 exporter 启动后、由入向 SYN 建立的连接。
+字节数含以太网头；包数是 GRO/GSO 合并后的，比线上实际包数少，曲线以字节为准。
+
 ## 快速开始
 
 ```bash
-# 1. 从当前内核导出类型定义（只需做一次）
-bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h
+# 构建镜像（镜像里会重新编译 BPF，不依赖本机 clang）
+docker build -t uhub.service.ucloud.cn/aigc-serving-public/ebpf-obs-agent:v0.1.0 . && docker push uhub.service.ucloud.cn/aigc-serving-public/ebpf-obs-agent:v0.1.0
 
-# 2. 编译 BPF C 代码并生成 Go 绑定（每次改完 .c 都要重新执行）
-go generate
+# 部署：镜像 tag 在 deploy/daemonset.yaml 里
+kubectl apply -f deploy/daemonset.yaml
 
-# 3. 运行（需要 root）
-go run .
+# 本机（Linux 6.6+，root）直接跑
+go generate && go build -o exporter . && sudo ./exporter -iface eth0 -ports 31771,30025
+curl localhost:9435/metrics
 
-# 4. 另开终端查看 bpf_printk 输出
-cat /sys/kernel/debug/tracing/trace_pipe
+# 端到端自测，见 e2e.sh 开头的注释
 ```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `-iface` | 空 | 网卡名；为空时找配置了 `$NODE_IP` 的网卡 |
+| `-listen` | `:9435` | metrics 地址 |
+| `-ports` | 空 | 只统计这些本机端口；为空统计所有入站连接 |
+| `-max-flows` | 131072 | 同时跟踪的连接数，要大于节点并发连接数 |
+| `-max-pairs` | 65536 | (src_ip, dst_ip, toa_ip) 组合上限，每个产生 5 条时间序列 |
+
+修改 `bpf/vmlinux.h`：`bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h`
 
 ---
 
@@ -278,5 +306,6 @@ NLB 做 FullNAT 时，后端看到的源 IP 是 NLB 的 IP，真实客户端 IP 
 - [x] 用 map 计数（包数 / 字节数），Go 每秒读一次
 - [x] 解析 Ethernet → IPv4 → TCP 头，按五元组统计
 - [x] 解析 TCP Option 中的 TOA，写入 LRU_HASH
-- [ ] FIN/RST 清理、NLB 网段校验、ringbuf 上报事件
+- [x] 重构成 Prometheus exporter，按真实客户端聚合
+- [ ] NLB 网段校验（只信任来自 NLB 的 TOA）、IPv6 TOA
 - [ ] 追踪类入门：tracepoint `sched/sched_process_exec`（自己写一个 execsnoop）

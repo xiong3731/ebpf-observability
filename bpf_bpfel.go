@@ -13,14 +13,6 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type bpfFlowCounters struct {
-	_         structs.HostLayout
-	RxPackets uint64
-	RxBytes   uint64
-	TxPackets uint64
-	TxBytes   uint64
-}
-
 type bpfFlowKey struct {
 	_          structs.HostLayout
 	LocalIp    uint32
@@ -29,28 +21,41 @@ type bpfFlowKey struct {
 	RemotePort uint16
 }
 
-type bpfStats struct {
+type bpfFlowState struct {
 	_       structs.HostLayout
-	Packets uint64
-	Bytes   uint64
+	ToaIp   uint32
+	Parsed  uint8
+	Settled uint8
+	Pad     uint16
+	Pending bpfPairStats
 }
 
-type bpfToaClient struct {
-	_    structs.HostLayout
-	Ip   uint32
-	Port uint16
-	Pad  uint16
+type bpfPairKey struct {
+	_     structs.HostLayout
+	SrcIp uint32
+	DstIp uint32
+	ToaIp uint32
+}
+
+type bpfPairStats struct {
+	_           structs.HostLayout
+	RxPackets   uint64
+	RxBytes     uint64
+	TxPackets   uint64
+	TxBytes     uint64
+	Connections uint64
 }
 
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	bpfMapFlows      = "flows"
-	bpfMapToaMap     = "toa_map"
-	bpfMapTotalStats = "total_stats"
-	bpfProgTcEgress  = "tc_egress"
-	bpfProgTcIngress = "tc_ingress"
+	bpfMapFlows       = "flows"
+	bpfMapPairs       = "pairs"
+	bpfMapPorts       = "ports"
+	bpfProgTcEgress   = "tc_egress"
+	bpfProgTcIngress  = "tc_ingress"
+	bpfVarFilterPorts = "filter_ports"
 )
 
 // loadBpf returns the embedded CollectionSpec for bpf.
@@ -103,15 +108,16 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	Flows      *ebpf.MapSpec `ebpf:"flows"`
-	ToaMap     *ebpf.MapSpec `ebpf:"toa_map"`
-	TotalStats *ebpf.MapSpec `ebpf:"total_stats"`
+	Flows *ebpf.MapSpec `ebpf:"flows"`
+	Pairs *ebpf.MapSpec `ebpf:"pairs"`
+	Ports *ebpf.MapSpec `ebpf:"ports"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
+	FilterPorts *ebpf.VariableSpec `ebpf:"filter_ports"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -134,16 +140,16 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	Flows      *ebpf.Map `ebpf:"flows"`
-	ToaMap     *ebpf.Map `ebpf:"toa_map"`
-	TotalStats *ebpf.Map `ebpf:"total_stats"`
+	Flows *ebpf.Map `ebpf:"flows"`
+	Pairs *ebpf.Map `ebpf:"pairs"`
+	Ports *ebpf.Map `ebpf:"ports"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.Flows,
-		m.ToaMap,
-		m.TotalStats,
+		m.Pairs,
+		m.Ports,
 	)
 }
 
@@ -151,6 +157,7 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
+	FilterPorts *ebpf.Variable `ebpf:"filter_ports"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.
