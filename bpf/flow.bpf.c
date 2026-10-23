@@ -2,7 +2,9 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
+// 插到链头后会直接让链停在这里并放行——后面的策略程序永远不会执行。
 #define TC_ACT_OK 0
+#define TC_ACT_UNSPEC (-1)
 #define ETH_P_IP 0x0800
 #define TCPOPT_TOA      254
 #define TCPOLEN_IP4_TOA 8
@@ -103,23 +105,23 @@ static __always_inline int handle(struct __sk_buff *skb, int egress)
     struct ethhdr *eth = data;
     // 边界检查：以太网头的结尾不能超出包的结尾
     if ((void *)(eth + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     if (eth->h_proto != bpf_htons(ETH_P_IP))
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // IP 头紧跟在以太网头后面（偏移 14）
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     if (ip->protocol != IPPROTO_TCP)   // 6，vmlinux.h 里的 enum 有这个值
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     if (ip->ihl < 5)                   // ihl 最小是 5（20 字节），小于 5 是畸形包
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // TCP 头在 IP 头后面，IP 头长度是 ihl * 4
     struct tcphdr *tcp = (void *)ip + ip->ihl * 4;
     if ((void *)(tcp + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
 
     // bpf_printk("%s %pI4:%d -> %pI4:%d", egress ? "OUT" : "IN",
@@ -132,7 +134,7 @@ static __always_inline int handle(struct __sk_buff *skb, int egress)
     __u32 zero = 0;
     struct stats *total = bpf_map_lookup_elem(&total_stats, &zero);
     if (!total)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     total->packets++;
     total->bytes += skb->len;
 
@@ -163,7 +165,7 @@ static __always_inline int handle(struct __sk_buff *skb, int egress)
         bpf_map_update_elem(&flows, &key, &zero_counters, BPF_NOEXIST);
         val = bpf_map_lookup_elem(&flows, &key);
         if (!val)
-            return TC_ACT_OK;
+            return TC_ACT_UNSPEC;
     }
 
     // 按方向选好要累加的字段，后面只写一份
@@ -196,7 +198,7 @@ static __always_inline int handle(struct __sk_buff *skb, int egress)
         }
         
     }   
-    return TC_ACT_OK;
+    return TC_ACT_UNSPEC;
 }
 
 
