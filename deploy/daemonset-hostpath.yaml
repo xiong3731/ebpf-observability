@@ -1,0 +1,99 @@
+# ebpf-obs-agent —— hostPath 版 DaemonSet（开发期用这个）
+#
+# 为什么要有这个版本：
+#   镜像版每次改代码 = docker build + push + rollout，几分钟，还得先解决仓库凭据。
+#   这个版本 = go build + scp + 重启 pod，几秒。
+#   Phase 1~4 你会改几十次代码，差别是决定性的。
+#
+# 用法见 deploy/README.md，核心就三步：
+#   1. CGO_ENABLED=0 go build -o agent .
+#   2. 把 agent scp 到每个 worker 节点的 /opt/ebpf-obs/agent
+#   3. kubectl rollout restart ds/ebpf-obs-agent -n ebpf-obs
+#
+# 跑通之后再把镜像版切回来。
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ebpf-obs-agent
+  namespace: ebpf-obs
+  labels:
+    app.kubernetes.io/name: ebpf-obs-agent
+    app.kubernetes.io/variant: hostpath
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ebpf-obs-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ebpf-obs-agent
+        app.kubernetes.io/variant: hostpath
+    spec:
+      # 现在没有 RBAC —— agent 只用 netlink 和 eBPF，不碰 k8s API，
+      # 用 default ServiceAccount 就够了。Phase 4 要读 Pod 元数据时再加。
+      hostNetwork: true
+      hostPID: true
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+
+      # 用宿主机的二进制，不拉镜像，所以不需要 imagePullSecrets
+      containers:
+        - name: agent
+          # 这个镜像只提供一个壳。可以换成任何节点上已缓存的镜像，
+          # 或者干脆用 pause —— 反正真正执行的是挂进来的 /agent。
+          image: uhub.service.ucloud.cn/aigc-serving-public/ubuntu:24.04
+          imagePullPolicy: IfNotPresent
+          command: ["/opt/ebpf-obs/agent"]
+
+          securityContext:
+            privileged: true
+
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+
+          volumeMounts:
+            - name: agent-bin
+              mountPath: /opt/ebpf-obs
+              readOnly: true
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+            - name: tracing
+              mountPath: /sys/kernel/debug
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+
+      volumes:
+        - name: agent-bin
+          hostPath:
+            # 先把二进制 scp 到这里（见 README）
+            path: /opt/ebpf-obs
+            type: Directory
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
+        - name: tracing
+          hostPath:
+            path: /sys/kernel/debug
+            type: Directory
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+            type: Directory
+
+      terminationGracePeriodSeconds: 10

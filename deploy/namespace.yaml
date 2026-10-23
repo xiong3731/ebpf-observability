@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ebpf-obs
+  labels:
+    # 不要给这个 namespace 打 pod-security.kubernetes.io/enforce 标签。
+    # agent 需要 privileged + hostNetwork，baseline/restricted 会直接拒绝。
+    # 当前集群所有 namespace 都没有 PSA 标签，默认放行。
+    app.kubernetes.io/name: ebpf-obs

@@ -1,0 +1,131 @@
+# ebpf-obs-agent —— 镜像版 DaemonSet
+#
+# 这是"正式"路径：镜像推到仓库，集群自己拉。
+# 开发期迭代请用 daemonset-hostpath.yaml（改代码不用重新 build+push 镜像）。
+#
+# 集群事实（2026-10-13 实测，modelverse-server-cn-gd）：
+#   节点内核      6.8.0-31-generic  → 支持 TCX（需 6.6+），无需 clsact 回退
+#   BTF           /sys/kernel/btf/vmlinux 存在 → CO-RE 可用
+#   CNI           uk8s-cni-vpc，Pod 的 veth 名字是 ucni*@if3（不是 veth*）
+#   默认出接口     eth0（节点还有 eth1/eth2，MAC 相同，像是 bonded）
+#   worker 节点   10.13.177.131 / 10.13.28.93 / 10.13.48.209
+#   master 节点   有 node-role.kubernetes.io/master + unschedulable taint，DaemonSet 不会落上去
+#   PSA           所有 namespace 都没有 pod-security 标签 → privileged 放行
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ebpf-obs-agent
+  namespace: ebpf-obs
+  labels:
+    app.kubernetes.io/name: ebpf-obs-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ebpf-obs-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ebpf-obs-agent
+    spec:
+      # 现在没有 RBAC —— agent 只用 netlink 和 eBPF，不碰 k8s API。
+      # Phase 4 要读 Pod 元数据时再加 ServiceAccount + ClusterRole。
+
+      # ── 为什么必须 hostNetwork ──────────────────────────────────
+      # Layer 0（接口绑定）要枚举"宿主机 netns 里所有 Pod 的 veth"。
+      # 不共享宿主网络命名空间的话，agent 只能看到自己那个 netns，
+      # 一个 veth 都看不见，整个 Layer 0 无从谈起。
+      hostNetwork: true
+
+      # 方便从宿主机排查（可选，但强烈建议留着）
+      hostPID: true
+
+      # 只跑 worker。master 本来就有 taint，这里显式写出来是为了意图清晰。
+      # 想连 master 一起观测就把这段删掉，并给上面的 taint 加 toleration。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+
+      # 镜像仓库凭据。注意：secret 是 namespace 级的，
+      # 集群里现有的 uhub-aigc 在 default/kube-system 等 namespace，
+      # 新建的 ebpf-obs 里没有，需要先复制过去：
+      #   kubectl get secret uhub-aigc -n default -o yaml \
+      #     | sed 's/namespace: default/namespace: ebpf-obs/' \
+      #     | kubectl apply -f -
+      imagePullSecrets:
+        - name: uhub-aigc
+
+      containers:
+        - name: agent
+          # TODO(你): 换成你自己的仓库路径。
+          # 集群现用仓库是 uhub.service.ucloud.cn，需要你本地 docker login 后 push。
+          image: uhub.service.ucloud.cn/CHANGE_ME/ebpf-obs-agent:dev
+          imagePullPolicy: IfNotPresent
+
+          securityContext:
+            # privileged 是偷懒但省事的做法，它一次给全了：
+            #   CAP_BPF       加载 eBPF 程序
+            #   CAP_NET_ADMIN 挂 tc / 改 qdisc
+            #   CAP_PERFMON   读 perf/ringbuf
+            #   CAP_SYS_ADMIN 挂 bpffs 等
+            # 严格做法是 capabilities.add 只列这几个。等跑通了再收紧。
+            privileged: true
+
+          env:
+            # Phase 4 用：服务端过滤 spec.nodeName == NODE_NAME，
+            #           以及用 status.podIP != NODE_IP 排除 hostNetwork Pod
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+
+          volumeMounts:
+            # bpf_link 的引用由 fd 持有，进程退出自动卸载。
+            # 挂 bpffs 是为了以后要 pin 对象时不用改 manifest。
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+            # bpf_printk 的输出（trace_pipe）在这里，调试必挂
+            - name: tracing
+              mountPath: /sys/kernel/debug
+            # CO-RE 要在运行时读 vmlinux BTF，只读挂载
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              # 注意：eBPF map 的内存不算在容器 cgroup 里，
+              # 这里的 limit 只管用户态部分。
+              memory: 512Mi
+
+      volumes:
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
+        - name: tracing
+          hostPath:
+            path: /sys/kernel/debug
+            type: Directory
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+            type: Directory
+
+      # 观测组件挂了不该拖慢节点，尽快重启
+      terminationGracePeriodSeconds: 10
