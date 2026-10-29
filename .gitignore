@@ -1,6 +1,15 @@
 # 构建产物
 /agent
 
+# bpf2go 生成文件（go generate ./... 可重新生成）
+/bpf_bpfel.go
+/bpf_bpfel.o
+/cmd/agent/bpf_bpfel.go
+/cmd/agent/bpf_bpfel.o
+
+# 从内核 BTF 生成的类型定义
+/bpf/vmlinux.h
+
 # 编辑器
 .vscode/
 .idea/
