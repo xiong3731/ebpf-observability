@@ -9,6 +9,48 @@
 #define TCPOPT_TOA      254
 #define TCPOLEN_IP4_TOA 8
 
+// 观测位置由 Go 选择的挂载入口决定，包本身没有 Kubernetes 身份。
+enum observation_point {
+    FROM_ENDPOINT = 1,
+    TO_ENDPOINT,
+    FROM_NETWORK,
+    TO_NETWORK,
+};
+
+// 固定 32 字节；IP 保留网络序字节，端口转换为主机序。
+// timestamp_ns 是内核单调时钟，不能直接当 Unix 时间。
+struct packet_event {
+    __u64 timestamp_ns;
+    __u32 ifindex;
+    __u32 length;
+    __u8 src_ip[4];
+    __u8 dst_ip[4];
+    __u16 src_port;
+    __u16 dst_port;
+    __u8 protocol;
+    __u8 point;
+    __u8 tcp_flags;
+    __u8 pad;
+};
+
+_Static_assert(sizeof(struct packet_event) == 32, "packet_event must be 32 bytes");
+
+// 保留 BTF 类型，供 bpf2go 生成 Go 结构体和枚举常量。
+const struct packet_event *unused_event __attribute__((unused));
+const enum observation_point *unused_point __attribute__((unused));
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 22); // 4 MiB，所有 CPU 共享。
+} events SEC(".maps");
+
+// 只统计事件写入失败；不代表业务报文被丢弃。
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} event_drops SEC(".maps");
 
 
 struct stats {
@@ -95,9 +137,11 @@ static long parse_one_opt(__u32 i, struct toa_ctx *c)
     return 0;
 };
 
-// 公共逻辑。egress: 0 = 收到的包，1 = 发出的包
-static __always_inline int handle(struct __sk_buff *skb, int egress)
+// local：Pod 口取 Pod 一侧，节点口取本节点一侧。
+// egress 表示 local 发送，并不等同于挂载接口的 egress hook。
+static __always_inline int handle(struct __sk_buff *skb, enum observation_point point)
 {
+    int egress = (point == FROM_ENDPOINT || point == TO_NETWORK);
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
 
@@ -117,11 +161,40 @@ static __always_inline int handle(struct __sk_buff *skb, int egress)
         return TC_ACT_UNSPEC;
     if (ip->ihl < 5)                   // ihl 最小是 5（20 字节），小于 5 是畸形包
         return TC_ACT_UNSPEC;
+    // 非首片没有 TCP 头，不能把分片负载误读成端口。
+    if (bpf_ntohs(ip->frag_off) & 0x1fff)
+        return TC_ACT_UNSPEC;
 
     // TCP 头在 IP 头后面，IP 头长度是 ihl * 4
     struct tcphdr *tcp = (void *)ip + ip->ihl * 4;
     if ((void *)(tcp + 1) > data_end)
         return TC_ACT_UNSPEC;
+
+    // 教学阶段逐包上报，先验证通路；后续改为按 flow 控制频率。
+    // 预留成功后，每条路径都必须 submit 或 discard。
+    struct packet_event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+    if (event) {
+        __builtin_memset(event, 0, sizeof(*event));
+        event->timestamp_ns = bpf_ktime_get_ns();
+        event->ifindex = skb->ifindex;
+        event->length = skb->len;
+        __builtin_memcpy(event->src_ip, &ip->saddr, 4);
+        __builtin_memcpy(event->dst_ip, &ip->daddr, 4);
+        event->src_port = bpf_ntohs(tcp->source);
+        event->dst_port = bpf_ntohs(tcp->dest);
+        event->protocol = ip->protocol;
+        event->point = point;
+        event->tcp_flags = (tcp->fin << 0) | (tcp->syn << 1) |
+                           (tcp->rst << 2) | (tcp->psh << 3) |
+                           (tcp->ack << 4) | (tcp->urg << 5) |
+                           (tcp->ece << 6) | (tcp->cwr << 7);
+        bpf_ringbuf_submit(event, 0);
+    } else {
+        __u32 key = 0;
+        __u64 *dropped = bpf_map_lookup_elem(&event_drops, &key);
+        if (dropped)
+            __sync_fetch_and_add(dropped, 1);
+    }
 
 
     // bpf_printk("%s %pI4:%d -> %pI4:%d", egress ? "OUT" : "IN",
@@ -203,18 +276,30 @@ static __always_inline int handle(struct __sk_buff *skb, int egress)
 
 
 
-// 挂到 ingress
+// 宿主机侧 veth：ingress 是 Pod 发出，egress 是 Pod 收到。
 SEC("tc")
-int tc_ingress(struct __sk_buff *skb)
+int endpoint_ingress(struct __sk_buff *skb)
 {
-    return handle(skb, 0);
+    return handle(skb, FROM_ENDPOINT);
 }
 
-// 挂到 egress
 SEC("tc")
-int tc_egress(struct __sk_buff *skb)
+int endpoint_egress(struct __sk_buff *skb)
 {
-    return handle(skb, 1);
+    return handle(skb, TO_ENDPOINT);
+}
+
+// 节点口：ingress 是网络进入，egress 是发往网络。
+SEC("tc")
+int host_ingress(struct __sk_buff *skb)
+{
+    return handle(skb, FROM_NETWORK);
+}
+
+SEC("tc")
+int host_egress(struct __sk_buff *skb)
+{
+    return handle(skb, TO_NETWORK);
 }
 
 char _license[] SEC("license") = "GPL";

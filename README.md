@@ -435,6 +435,27 @@ retina 的程序永远 `return TC_ACT_UNSPEC`（`packetparser.c:291,301,309,317`
 
 ## Phase 2 — 全量事件流：ringbuf
 
+### 当前实现：先打通逐包事件通路
+
+`bpf/flow.bpf.c` 定义 32 字节的 `packet_event`，通过 4 MiB ringbuf 上报；
+`cmd/agent/events.go` 使用 bpf2go 生成的结构体解码并打印。
+事件包括源/目的 IP 和端口、协议、观测位置、ifindex、包长、TCP flags、内核单调时钟时间。
+IP 使用网络序字节数组，端口为主机序；`ktime_ns` 不是 Unix 时间戳。
+
+```bash
+go generate ./...
+CGO_ENABLED=0 go build -trimpath -o agent ./cmd/agent
+# 部署到已有开发集群：构建、分发、重启并查看日志。
+hack/dev.sh ./cmd/agent
+```
+
+当前对成功解析的 IPv4 TCP 包逐包上报，用少量 curl 请求验证；这只是 Phase 2 的通路验证，
+高流量下逐包打印可能使 ringbuf 积压，后续需要加入 flow 上报频率控制。
+多个挂载点观察到的同一报文会分别输出，不应相加作为唯一包数。
+每 5 秒输出 `dropped_total`（按 CPU 求和的累计事件写入失败次数），它不代表业务丢包。
+程序退出时先卸载，再关闭 reader 唤醒阻塞读取，并等待读取 goroutine 结束。
+TOA 和旧 flow 计数仍保留在 map 中，这一版事件暂不携带它们。
+
 **目标**：把节点上所有 TCP 连接的结构化事件实时送到终端。本阶段**不碰 k8s、不做过滤**。
 
 为什么先做这个：Layer 2 的全部输入就是它。没有"一条 flow 从哪来、到哪去、方向是什么"，就无从归类。先把数据完整地捞出来，再讨论"它是谁的"。

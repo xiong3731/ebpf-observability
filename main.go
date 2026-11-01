@@ -1,6 +1,6 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel bpf bpf/flow.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -type packet_event -type observation_point bpf bpf/flow.bpf.c
 
 import (
 	"encoding/binary"
@@ -32,7 +32,7 @@ func main() {
 
 	ingress, err := link.AttachTCX(link.TCXOptions{
 		Interface: iface.Index,
-		Program:   objs.TcIngress,
+		Program:   objs.HostIngress,
 		Attach:    ebpf.AttachTCXIngress,
 	})
 	if err != nil {
@@ -44,7 +44,7 @@ func main() {
 
 	egress, err := link.AttachTCX(link.TCXOptions{
 		Interface: iface.Index,
-		Program:   objs.TcEgress,
+		Program:   objs.HostEgress,
 		Attach:    ebpf.AttachTCXEgress,
 	})
 	if err != nil {

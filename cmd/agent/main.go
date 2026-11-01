@@ -1,4 +1,4 @@
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel bpf ../../bpf/flow.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -type packet_event -type observation_point bpf ../../bpf/flow.bpf.c
 
 package main
 
@@ -15,6 +15,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/vishvananda/netlink"
 )
 
@@ -67,16 +68,29 @@ func newAttacher() *attacher {
 }
 
 // attachLocked 幂等挂载 ingress + egress。调用者必须持有 at.mu。
-func (at *attacher) attachLocked(l netlink.Link, objs *bpfObjects) error {
+func (at *attacher) attachLocked(l netlink.Link, class linkClass, objs *bpfObjects) error {
 	a := l.Attrs()
 	k := keyOf(a)
 	if _, ok := at.have[k]; ok {
 		return nil
 	}
 
+	// 同一个 ingress hook，在 Pod 口和节点口代表不同的观测位置。
+	var ingressProgram, egressProgram *ebpf.Program
+	switch class {
+	case classPod:
+		ingressProgram = objs.EndpointIngress
+		egressProgram = objs.EndpointEgress
+	case classNode:
+		ingressProgram = objs.HostIngress
+		egressProgram = objs.HostEgress
+	default:
+		return fmt.Errorf("不支持的接口分类: %s", class)
+	}
+
 	ingress, err := link.AttachTCX(link.TCXOptions{
 		Interface: a.Index,
-		Program:   objs.TcIngress,
+		Program:   ingressProgram,
 		Attach:    ebpf.AttachTCXIngress,
 		Anchor:    link.Head(), // 先于策略程序执行，被丢弃的包也能看到
 	})
@@ -86,7 +100,7 @@ func (at *attacher) attachLocked(l netlink.Link, objs *bpfObjects) error {
 
 	egress, err := link.AttachTCX(link.TCXOptions{
 		Interface: a.Index,
-		Program:   objs.TcEgress,
+		Program:   egressProgram,
 		Attach:    ebpf.AttachTCXEgress,
 		Anchor:    link.Head(),
 	})
@@ -144,7 +158,7 @@ func (at *attacher) sync(links []netlink.Link, nodeIface string, objs *bpfObject
 		if _, ok := at.have[k]; ok {
 			continue
 		}
-		if err := at.attachLocked(t.link, objs); err != nil {
+		if err := at.attachLocked(t.link, t.class, objs); err != nil {
 			// 不记入 have，下一轮自然重试
 			slog.Error("挂载失败", append(k.logArgs(), "class", t.class, "err", err)...)
 			continue
@@ -189,16 +203,47 @@ func run() error {
 		return fmt.Errorf("LinkList: %w", err)
 	}
 	logInventory(links, nodeIface)
+
+	// 先打开 reader，再挂载程序，避免启动期间无人读取。
+	reader, err := ringbuf.NewReader(objs.Events)
+	if err != nil {
+		return fmt.Errorf("打开 ringbuf: %w", err)
+	}
+	readerErr := make(chan error, 1)
+	var readerWG sync.WaitGroup
+	readerWG.Add(1)
+	go func() {
+		defer readerWG.Done()
+		readerErr <- readEvents(reader)
+	}()
+	defer func() {
+		// 先停止产生事件，再 Close 唤醒阻塞读取，等待 goroutine 退出。
+		at.closeAll()
+		if err := reader.Close(); err != nil {
+			slog.Warn("关闭 ringbuf 失败", "err", err)
+		}
+		readerWG.Wait()
+	}()
+	slog.Info("ringbuf 已就绪", "mode", "逐包教学模式", "capacity_bytes", reader.BufferSize())
 	at.sync(links, nodeIface, objs)
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	statsTicker := time.NewTicker(5 * time.Second)
+	defer statsTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			slog.Info("收到退出信号，开始卸载")
 			return nil
+		case err := <-readerErr:
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("ringbuf 读取意外结束")
+		case <-statsTicker.C:
+			logEventDrops(objs.EventDrops)
 		case <-ticker.C:
 			links, err := netlink.LinkList()
 			if err != nil {
